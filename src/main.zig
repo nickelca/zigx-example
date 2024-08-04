@@ -1,9 +1,27 @@
 const std = @import("std");
 const x = @import("x");
 const common = @import("common.zig");
+const debug_log = @import("debug_log.zig");
 
 const window_width = 400;
 const window_height = 400;
+
+fn createGc(conn: common.ConnectResult, window_id: u32, gc_id: u32, options: x.GcOptions) !void {
+    var msg_buf: [x.create_gc.max_len]u8 = undefined;
+    const len = x.create_gc.serialize(&msg_buf, .{
+        .gc_id = gc_id,
+        .drawable_id = window_id,
+    }, options);
+    try conn.send(msg_buf[0..len]);
+}
+
+fn getFontInfo(conn: common.ConnectResult, fg_gc_id: u32) !void {
+    const text_literal = [_]u16{'m'};
+    const text = x.Slice(u16, [*]const u16){ .ptr = &text_literal, .len = text_literal.len };
+    var msg: [x.query_text_extents.getLen(text.len)]u8 = undefined;
+    x.query_text_extents.serialize(&msg, fg_gc_id, text);
+    try conn.send(&msg);
+}
 
 pub fn main() !u8 {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -15,21 +33,12 @@ pub fn main() !u8 {
 
     const screen = blk: {
         const fixed = conn.setup.fixed();
-        inline for (@typeInfo(@TypeOf(fixed.*)).Struct.fields) |field| {
-            std.log.debug("{s}: {any}", .{ field.name, @field(fixed, field.name) });
-        }
-        std.log.debug("vendor: {s}", .{try conn.setup.getVendorSlice(fixed.vendor_len)});
         const format_list_offset = x.ConnectSetup.getFormatListOffset(fixed.vendor_len);
         const format_list_limit = x.ConnectSetup.getFormatListLimit(format_list_offset, fixed.format_count);
-        std.log.debug("fmt list off={} limit={}", .{ format_list_offset, format_list_limit });
-        const formats = try conn.setup.getFormatList(format_list_offset, format_list_limit);
-        for (formats, 0..) |format, i| {
-            std.log.debug("format[{}] depth={:3} bpp={:3} scanpad={:3}", .{ i, format.depth, format.bits_per_pixel, format.scanline_pad });
-        }
         const screen = conn.setup.getFirstScreenPtr(format_list_limit);
-        inline for (@typeInfo(@TypeOf(screen.*)).Struct.fields) |field| {
-            std.log.debug("SCREEN 0| {s}: {any}", .{ field.name, @field(screen, field.name) });
-        }
+        debug_log.connectSetup(conn, fixed);
+        debug_log.formatList(conn, format_list_offset, format_list_limit);
+        debug_log.screenProperties(screen);
         break :blk screen;
     };
 
@@ -76,37 +85,16 @@ pub fn main() !u8 {
     }
 
     const bg_gc_id = window_id + 1;
-    {
-        var msg_buf: [x.create_gc.max_len]u8 = undefined;
-        const len = x.create_gc.serialize(&msg_buf, .{
-            .gc_id = bg_gc_id,
-            .drawable_id = window_id,
-        }, .{
-            .foreground = screen.black_pixel,
-        });
-        try conn.send(msg_buf[0..len]);
-    }
+    try createGc(conn, window_id, bg_gc_id, .{
+        .foreground = screen.black_pixel,
+    });
     const fg_gc_id = window_id + 2;
-    {
-        var msg_buf: [x.create_gc.max_len]u8 = undefined;
-        const len = x.create_gc.serialize(&msg_buf, .{
-            .gc_id = fg_gc_id,
-            .drawable_id = window_id,
-        }, .{
-            .background = screen.black_pixel,
-            .foreground = 0xffaadd,
-        });
-        try conn.send(msg_buf[0..len]);
-    }
+    try createGc(conn, window_id, fg_gc_id, .{
+        .background = screen.black_pixel,
+        .foreground = 0xffaadd,
+    });
 
-    // get some font information
-    {
-        const text_literal = [_]u16{'m'};
-        const text = x.Slice(u16, [*]const u16){ .ptr = &text_literal, .len = text_literal.len };
-        var msg: [x.query_text_extents.getLen(text.len)]u8 = undefined;
-        x.query_text_extents.serialize(&msg, fg_gc_id, text);
-        try conn.send(&msg);
-    }
+    try getFontInfo(conn, fg_gc_id);
 
     const double_buf = try x.DoubleBuffer.init(
         std.mem.alignForward(usize, 1000, std.mem.page_size),
